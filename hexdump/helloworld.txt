@@ -1,1 +1,4 @@
-hello world
+Hello, world!
+I am trying to learn how to program in C.
+Should be exciting, especially since AI can
+do everything way better!
