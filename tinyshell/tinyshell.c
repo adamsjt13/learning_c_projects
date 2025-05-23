@@ -3,13 +3,17 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <limits.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 typedef int (*CommandFunc)(char **args);
 
 int cmd_echo(char **args);
 int cmd_exit(char **args);
 int cmd_type(char **args);
-int find_in_path(const char *cmd);
+int cmd_pwd(char **args);
+int cmd_cd(char **args);
+int find_in_path(const char *cmd, const int print_path);
 
 struct Command {
   const char *name;
@@ -20,6 +24,8 @@ struct Command builtins[] = {
   {"echo", cmd_echo},
   {"exit", cmd_exit},
   {"type", cmd_type},
+  {"pwd", cmd_pwd},
+  {"cd", cmd_cd},
   {NULL, NULL}
 };
 
@@ -52,7 +58,7 @@ int cmd_type(char **args) {
 
   if (found) {
     printf("%s is a shell builtin\n", args[1]);
-  } else if (find_in_path(args[1]) == 1) {
+  } else if (find_in_path(args[1], 1) == 1) {
     // do nothing
   } else {
     printf("%s: not found\n", args[1]);
@@ -60,7 +66,31 @@ int cmd_type(char **args) {
   return 0;
 }
 
-int find_in_path(const char *cmd) {
+int cmd_pwd(char **args) {
+  char cwd[PATH_MAX];
+  if(getcwd(cwd, sizeof(cwd)) != NULL) {
+    printf("%s\n", cwd);
+  }
+  return 0;
+}
+
+int cmd_cd(char **args) {
+  char *target_dir = args[1];
+
+  if(args[1] == NULL) {
+    fprintf(stderr, "cd: missing operand\n");
+    return 0;
+  } else if (strcmp(target_dir, "~") == 0) {
+    target_dir = getenv("HOME");
+  }
+  if (chdir(target_dir) != 0) {
+    fprintf(stderr, "cd: %s: ", args[1]);
+    perror("");
+    return 0;
+  }
+}
+
+int find_in_path(const char *cmd, const int print_path) {
   char *path_env = getenv("PATH");
   if(!path_env) return -1;
 
@@ -74,7 +104,9 @@ int find_in_path(const char *cmd) {
     snprintf(full_path, sizeof(full_path), "%s/%s", dir, cmd);
 
     if(access(full_path, X_OK) == 0) {
-      printf("%s is %s\n", cmd, full_path);
+      if(print_path == 1) {
+        printf("%s is %s\n", cmd, full_path);
+      }
       return 1;
     }
 
@@ -82,6 +114,40 @@ int find_in_path(const char *cmd) {
   }
 
   return -1;
+}
+
+int is_builtin(char *cmd) {
+  for(int i = 0; builtins[i].name != NULL; i++) {
+    if (strcmp(cmd, builtins[i].name) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+int is_external_command(char *cmd) {
+  if (find_in_path(cmd, 0) == 1) {
+    return 1;
+  } else {
+    return -1;
+  }
+}
+
+int run_external_command(char **args) {
+  pid_t pid = fork();
+
+  if(pid < 0){
+    perror("Fork failed\n");
+    return -1;
+  } else if(pid == 0) {
+    execvp(args[0], args);
+    perror("execvp failed\n");
+  } else {
+    int status;
+    waitpid(pid, &status, 0);
+    return status;
+  }
+
 }
 
 #define INPUT_SIZE 100
@@ -115,18 +181,15 @@ int main() {
     args[i + 1] = NULL;
 
     int found = 0;
-    for(int i = 0; builtins[i].name != NULL; i++) {
-      if(strcmp(args[0], builtins[i].name) == 0) {
-        exit_shell = builtins[i].func(args);
-        found = 1;
-      }
-    }
-
-    if (!found) {
+    int builtin_func = is_builtin(args[0]);
+    if(builtin_func >= 0) {
+      exit_shell = builtins[builtin_func].func(args);
+    } else if(is_external_command(args[0]) == 1) {
+      run_external_command(args);
+    } else {
       printf("%s: command not found\n", args[0]);
     }
-
   }
-
+  
   return 0;
 }
