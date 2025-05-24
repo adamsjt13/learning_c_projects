@@ -6,6 +6,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#define MAX_INPUT_SIZE 1024
+#define MAX_TOKENS 64
+#define MAX_TOKEN_LENGTH 256
+
 typedef int (*CommandFunc)(char **args);
 
 int cmd_echo(char **args);
@@ -14,11 +18,19 @@ int cmd_type(char **args);
 int cmd_pwd(char **args);
 int cmd_cd(char **args);
 int find_in_path(const char *cmd, const int print_path);
+void tokenize(char *input, char **argv, char tokens[][MAX_TOKEN_LENGTH]);
 
 struct Command {
   const char *name;
   CommandFunc func;
 };
+
+typedef enum {
+  STATE_DEFAULT,
+  STATE_IN_WORD,
+  STATE_IN_SINGLE_QUOTE,
+  STATE_IN_DOUBLE_QUOTE
+} TokenizerState;
 
 struct Command builtins[] = {
   {"echo", cmd_echo},
@@ -150,14 +162,73 @@ int run_external_command(char **args) {
 
 }
 
-#define INPUT_SIZE 100
-#define MAX_ARGS 10
+void tokenize(char *input, char **argv, char tokens[][MAX_TOKEN_LENGTH]) {
+  TokenizerState state = STATE_DEFAULT;
+  int i = 0;
+  int token_count = 0;
+  int current_token_length = 0;
+  int in_token = 0;
+
+  while(input[i] != '\0'){
+    char c = input[i];
+    
+    switch(state) {
+      case STATE_DEFAULT:
+        if(c == ' ') {
+          if(in_token) {
+            tokens[token_count][current_token_length + 1] = '\0';
+            argv[token_count] = tokens[token_count];
+            current_token_length = 0;
+            token_count++;
+            in_token = 0;
+          }
+          i++;
+          break;
+        } else if(c == '\'') {
+          state = STATE_IN_SINGLE_QUOTE;
+          i++;
+          in_token = 1;
+          break;
+        } else {
+          state = STATE_IN_WORD;
+          in_token = 1;
+        }
+      case STATE_IN_WORD:
+        if(c == ' ') {
+            state = STATE_DEFAULT;
+            break;
+          } else if(c == '\'') {
+            i++;
+            break;
+          } else {
+            tokens[token_count][current_token_length] = c;
+            current_token_length++;
+            i++;
+            break;
+          }        
+
+      case STATE_IN_SINGLE_QUOTE:
+        if(c != '\'') {
+          tokens[token_count][current_token_length] = c;
+          current_token_length++;
+          i++;
+          break;
+        } else {
+          i++;
+          state = STATE_DEFAULT;
+          break;
+        }
+        
+    }
+    argv[token_count] = tokens[token_count];
+  }
+  argv[token_count + 1] = NULL;
+}
 
 int main() {
-  char input[INPUT_SIZE];
-  char output[INPUT_SIZE];
-  char *args[MAX_ARGS];
-  char *token;
+  char input[MAX_INPUT_SIZE];
+  char *args[MAX_TOKENS];
+  char tokens[MAX_TOKENS][MAX_TOKEN_LENGTH];
   int exit_shell = 0;
 
   setbuf(stdout, NULL); // flush output
@@ -165,22 +236,23 @@ int main() {
   while(!exit_shell) {
 
     printf("$ ");
-    if(fgets(input, INPUT_SIZE, stdin) == NULL) {
+
+    if(fgets(input, MAX_INPUT_SIZE, stdin) == NULL) {
       break;
     }
 
+    // clear out buffers for new input
+    memset(tokens, 0, sizeof(tokens));
+    memset(args, 0, sizeof(args));
+
     input[strlen(input) - 1] = '\0';
-    
-    int i = 0;
-    token = strtok(input, " ");
-    while(token != NULL && i < MAX_ARGS - 1) {
-      args[i++] = token;
-      token = strtok(NULL, " ");
-    }
 
-    args[i + 1] = NULL;
+    tokenize(input, args, tokens);
 
-    int found = 0;
+    // for(int i = 0; args[i] != NULL; i++) {
+    //   printf("arg %d: %s\n", i, args[i]);
+    // }
+
     int builtin_func = is_builtin(args[0]);
     if(builtin_func >= 0) {
       exit_shell = builtins[builtin_func].func(args);
