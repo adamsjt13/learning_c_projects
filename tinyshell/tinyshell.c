@@ -5,22 +5,31 @@
 #include <limits.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 #define MAX_INPUT_SIZE 1024
 #define MAX_TOKENS 64
 #define MAX_TOKEN_LENGTH 256
 
-typedef int (*CommandFunc)(char **args);
+typedef struct {
+  char *cmd_args[MAX_TOKENS];
+  char *infile;
+  char *outfile;
+  char *errfile;
+  int append;
+} Command;
 
-int cmd_echo(char **args);
-int cmd_exit(char **args);
-int cmd_type(char **args);
-int cmd_pwd(char **args);
-int cmd_cd(char **args);
+typedef int (*CommandFunc)(Command *cmd);
+
+int cmd_echo(Command *cmd);
+int cmd_exit(Command *cmd);
+int cmd_type(Command *cmd);
+int cmd_pwd(Command *cmd);
+int cmd_cd(Command *cmd);
 int find_in_path(const char *cmd, const int print_path);
 void tokenize(char *input, char **argv, char tokens[][MAX_TOKEN_LENGTH]);
 
-struct Command {
+struct Builtin {
   const char *name;
   CommandFunc func;
 };
@@ -32,7 +41,7 @@ typedef enum {
   STATE_IN_DOUBLE_QUOTE
 } TokenizerState;
 
-struct Command builtins[] = {
+struct Builtin builtins[] = {
   {"echo", cmd_echo},
   {"exit", cmd_exit},
   {"type", cmd_type},
@@ -41,44 +50,74 @@ struct Command builtins[] = {
   {NULL, NULL}
 };
 
-int cmd_echo(char **args) {
-  for (int i = 1; args[i] != NULL; i++) {
-    printf("%s", args[i]);
-    if (args[i + 1] != NULL) {
+int cmd_echo(Command *cmd) {
+  int saved_stdout = -1;
+  int saved_stderr = -1;
+
+  if(cmd->outfile){
+    saved_stdout = dup(STDOUT_FILENO);
+    int flags = O_WRONLY | O_CREAT | (cmd->append ? O_APPEND : O_TRUNC);
+    int fd = open(cmd->outfile, flags, 0644);
+    if (fd < 0) { perror("open outfile"); exit(1); }
+    dup2(fd, STDOUT_FILENO);
+    close(fd);
+  }
+  if(cmd->errfile){
+    saved_stderr = dup(STDERR_FILENO);
+    int flags = O_WRONLY | O_CREAT | (cmd->append ? O_APPEND : O_TRUNC);
+    int fd = open(cmd->errfile, flags, 0644);
+    if (fd < 0) { perror("open errfile"); exit(1); }
+    dup2(fd, STDERR_FILENO);
+    close(fd);
+  }
+
+  for (int i = 1; cmd->cmd_args[i] != NULL; i++) {
+    printf("%s", cmd->cmd_args[i]);
+    if (cmd->cmd_args[i + 1] != NULL) {
       printf(" ");
     }
   }
   printf("\n");
+
+  if (saved_stdout != -1) {
+    dup2(saved_stdout, STDOUT_FILENO);
+    close(saved_stdout);
+  }
+  if (saved_stderr != -1) {
+    dup2(saved_stderr, STDERR_FILENO);
+    close(saved_stderr);
+  }
+
   return 0;
 }
 
-int cmd_exit(char **args) {
-  if (args[1] != NULL && strcmp(args[1], "0") == 0) {
+int cmd_exit(Command *cmd) {
+  if (cmd->cmd_args[1] != NULL && strcmp(cmd->cmd_args[1], "0") == 0) {
     return 1;
   }
-  printf("%s: command not found\n", args[0]);
+  printf("%s: command not found\n", cmd->cmd_args[0]);
   return 0;
 }
 
-int cmd_type(char **args) {
+int cmd_type(Command *cmd) {
   int found = 0;
   for(int i = 0; builtins[i].name != NULL; i++) {
-    if (strcmp(args[1], builtins[i].name) == 0) {
+    if (strcmp(cmd->cmd_args[1], builtins[i].name) == 0) {
       found = 1;
     }
   }
 
   if (found) {
-    printf("%s is a shell builtin\n", args[1]);
-  } else if (find_in_path(args[1], 1) == 1) {
+    printf("%s is a shell builtin\n", cmd->cmd_args[1]);
+  } else if (find_in_path(cmd->cmd_args[1], 1) == 1) {
     // do nothing
   } else {
-    printf("%s: not found\n", args[1]);
+    printf("%s: not found\n", cmd->cmd_args[1]);
   }
   return 0;
 }
 
-int cmd_pwd(char **args) {
+int cmd_pwd(Command *cmd) {
   char cwd[PATH_MAX];
   if(getcwd(cwd, sizeof(cwd)) != NULL) {
     printf("%s\n", cwd);
@@ -86,17 +125,17 @@ int cmd_pwd(char **args) {
   return 0;
 }
 
-int cmd_cd(char **args) {
-  char *target_dir = args[1];
+int cmd_cd(Command *cmd) {
+  char *target_dir = cmd->cmd_args[1];
 
-  if(args[1] == NULL) {
+  if(cmd->cmd_args[1] == NULL) {
     fprintf(stderr, "cd: missing operand\n");
     return 0;
   } else if (strcmp(target_dir, "~") == 0) {
     target_dir = getenv("HOME");
   }
   if (chdir(target_dir) != 0) {
-    fprintf(stderr, "cd: %s: ", args[1]);
+    fprintf(stderr, "cd: %s: ", cmd->cmd_args[1]);
     perror("");
     return 0;
   }
@@ -145,15 +184,36 @@ int is_external_command(char *cmd) {
   }
 }
 
-int run_external_command(char **args) {
+int run_external_command(Command *cmd) {
   pid_t pid = fork();
 
   if(pid < 0){
     perror("Fork failed\n");
     return -1;
   } else if(pid == 0) {
-    execvp(args[0], args);
+    if(cmd->infile) {
+      int fd = open(cmd->infile, O_RDONLY);
+      if (fd < 0) { perror("open infile"); exit(1); }
+      dup2(fd, STDIN_FILENO);
+      close(fd);
+    }
+    if(cmd->outfile) {
+      int flags = O_WRONLY | O_CREAT | (cmd->append ? O_APPEND : O_TRUNC);
+      int fd = open(cmd->outfile, flags, 0644);
+      if (fd < 0) { perror("open outfile"); exit(1); }
+      dup2(fd, STDOUT_FILENO);
+      close(fd);
+    }
+    if(cmd->errfile) {
+      int flags = O_WRONLY | O_CREAT | (cmd->append ? O_APPEND : O_TRUNC);
+      int fd = open(cmd->errfile, flags, 0644);
+      if (fd < 0) { perror("open outfile"); exit(1); }
+      dup2(fd, STDERR_FILENO);
+      close(fd);
+    }
+    execvp(cmd->cmd_args[0], cmd->cmd_args);
     perror("execvp failed\n");
+    return 1;
   } else {
     int status;
     waitpid(pid, &status, 0);
@@ -269,6 +329,31 @@ void tokenize(char *input, char **argv, char tokens[][MAX_TOKEN_LENGTH]) {
   argv[token_count + 1] = NULL;
 }
 
+void parse(char **args, Command *cmd) {
+  int arg_index = 0;
+
+  for(int i = 0; args[i] != NULL; i++) {
+    if(strcmp(args[i],"1>") == 0 || strcmp(args[i], ">") == 0) {
+      cmd->outfile = args[i + 1];
+      i++;
+    } else if(strcmp(args[i],"1>>") == 0 || strcmp(args[i], ">>") == 0) {
+      cmd->outfile = args[i + 1];
+      cmd->append = 1;
+      i++;
+    } else if(strcmp(args[i],"2>") == 0) {
+      cmd->errfile = args[i + 1];
+      i++;
+    } else if(strcmp(args[i],"2>>") == 0) {
+      cmd->errfile = args[i + 1];
+      cmd->append = 1;
+      i++;
+    } else {
+      cmd->cmd_args[arg_index++] = args[i];
+    }
+  }
+  cmd->cmd_args[arg_index] = NULL;
+}
+
 int main() {
   char input[MAX_INPUT_SIZE];
   char *args[MAX_TOKENS];
@@ -280,6 +365,13 @@ int main() {
   while(!exit_shell) {
 
     printf("$ ");
+
+    Command cmd = {
+      .cmd_args = {NULL},
+      .infile = NULL,
+      .outfile = NULL,
+      .append = 0
+    };
 
     if(fgets(input, MAX_INPUT_SIZE, stdin) == NULL) {
       break;
@@ -293,13 +385,22 @@ int main() {
 
     tokenize(input, args, tokens);
 
-    int builtin_func = is_builtin(args[0]);
+    parse(args, &cmd);
+
+    // for(int i = 0; cmd.cmd_args[i] != NULL; i++) {
+    //   printf("arg %d: %s\n", i, cmd.cmd_args[i]);
+    // }
+
+    // printf("outfile: %s\n", cmd.outfile);
+    // printf("infile: %s\n", cmd.infile);
+
+    int builtin_func = is_builtin(cmd.cmd_args[0]);
     if(builtin_func >= 0) {
-      exit_shell = builtins[builtin_func].func(args);
-    } else if(is_external_command(args[0]) == 1) {
-      run_external_command(args);
+      exit_shell = builtins[builtin_func].func(&cmd);
+    } else if(is_external_command(cmd.cmd_args[0]) == 1) {
+      run_external_command(&cmd);
     } else {
-      printf("%s: command not found\n", args[0]);
+      printf("%s: command not found\n", cmd.cmd_args[0]);
     }
   }
   
