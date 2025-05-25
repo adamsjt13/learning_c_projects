@@ -166,20 +166,34 @@ void tokenize(char *input, char **argv, char tokens[][MAX_TOKEN_LENGTH]) {
   TokenizerState state = STATE_DEFAULT;
   int i = 0;
   int token_count = 0;
-  int current_token_length = 0;
+  int token_index = 0;
   int in_token = 0;
+  int escape = 0;
 
   while(input[i] != '\0'){
     char c = input[i];
-    
+
     switch(state) {
       case STATE_DEFAULT:
+        if(c == '\\') {
+          escape = 1;
+          i++;
+          break;
+        }
+
+        if(escape) {
+          tokens[token_count][token_index++] = c;
+          i++;
+          escape = 0;
+          break;
+        }
+
         if(c == ' ') {
           if(in_token) {
-            tokens[token_count][current_token_length + 1] = '\0';
+            tokens[token_count][token_index++] = '\0';
             argv[token_count] = tokens[token_count];
-            current_token_length = 0;
             token_count++;
+            token_index = 0;
             in_token = 0;
           }
           i++;
@@ -189,35 +203,65 @@ void tokenize(char *input, char **argv, char tokens[][MAX_TOKEN_LENGTH]) {
           i++;
           in_token = 1;
           break;
+        } else if(c == '\"') {
+          state = STATE_IN_DOUBLE_QUOTE;
+          i++;
+          in_token = 1;
+          break;
         } else {
           state = STATE_IN_WORD;
           in_token = 1;
         }
+
       case STATE_IN_WORD:
-        if(c == ' ') {
+        if(c == ' ' || c == '\\') {
             state = STATE_DEFAULT;
             break;
-          } else if(c == '\'') {
+        } else if(c == '\'' || c == '\"') {
             i++;
             break;
-          } else {
-            tokens[token_count][current_token_length] = c;
-            current_token_length++;
+        } else {
+            tokens[token_count][token_index++] = c;
             i++;
             break;
-          }        
+        }        
 
       case STATE_IN_SINGLE_QUOTE:
-        if(c != '\'') {
-          tokens[token_count][current_token_length] = c;
-          current_token_length++;
-          i++;
-          break;
-        } else {
+        if(c == '\'') {
           i++;
           state = STATE_DEFAULT;
           break;
+        } else {
+          tokens[token_count][token_index++] = c;
+          i++;
+          break;
         }
+
+      case STATE_IN_DOUBLE_QUOTE:
+        if(escape) {
+          if(c == '\\' || c == '$' || c == '\"' || c == '\n') {
+            tokens[token_count][token_index++] = c;
+            i++;
+          } else {
+            tokens[token_count][token_index++] = '\\';
+          }
+          escape = 0;
+          break;
+        }
+      
+        if(c == '\"') {
+          i++;
+          state = STATE_DEFAULT;
+          break;
+        } else if(c == '\\') {
+          escape = 1;
+          i++;
+        } else {
+          tokens[token_count][token_index++] = c;
+          i++;
+          break;
+        }
+
         
     }
     argv[token_count] = tokens[token_count];
@@ -248,10 +292,6 @@ int main() {
     input[strlen(input) - 1] = '\0';
 
     tokenize(input, args, tokens);
-
-    // for(int i = 0; args[i] != NULL; i++) {
-    //   printf("arg %d: %s\n", i, args[i]);
-    // }
 
     int builtin_func = is_builtin(args[0]);
     if(builtin_func >= 0) {
